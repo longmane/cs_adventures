@@ -37,6 +37,7 @@ int Internals_size();
 //returns the size of my 
 void Shotty();
 //kills zombies
+void handler(int action);
 
 //Declaration and implimentation of weird stuff
 char *Internals_string[] = {
@@ -46,6 +47,8 @@ char *Internals_string[] = {
 int (*Internals_function[]) (char **) = {
 	&Internal_cd, &Internal_status, &Internal_exit
 };
+
+int num_pro = 1;	//Number of processes to fork
 
 pid_t pidList[100] = {0};
 //keeps a list of PID's
@@ -68,6 +71,18 @@ int maxArg = 0;
 
 int main(int argc, char **argv)
 {
+
+	struct sigaction sig;		//Signal handling struct
+
+	sigemptyset(&sig.sa_mask);
+	sig.sa_flags = 0;
+	sig.sa_handler = handler;	//Tells the system to use my signal handler
+
+	sigaction(SIGHUP, &sig, NULL);
+	sigaction(SIGINT, &sig, NULL);
+	sigaction(SIGQUIT, &sig, NULL);
+
+
 	shell_loop();
 	
 	return 0;
@@ -377,6 +392,15 @@ void Shotty()
 			}
 		}
 	}
+}
+
+//Waits for all of the children to finish
+void burn_kids() {
+	int i, status;
+	for (i = 0; i < num_pro; ++i) {
+		wait(NULL);
+	}
+}
 
 //Sends signals to all of the offspring.
 void handler(int action) {
@@ -398,13 +422,13 @@ void handler(int action) {
 		signal = SIGQUIT;
 	}
 	for (i = 0; i < num_pro; ++i) {
-		kill(procces[i], signal);
+		kill(pidList[i], signal);
 	}
 
 	//Kill all of the kids
 	burn_kids();
 
-	free(procces);
+	//free(pidList);
 
 	exit(1);
 }
