@@ -1,54 +1,38 @@
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
-#include <signal.h>
 
-//////////////////
-//framework for the shell was based heavily off of 
-//http://stephen-brennan.com/2015/01/16/write-a-shell-in-c/
-//////////////////
+#define MORE_BUFF 64 //used to reallocate more space for the buffer
+#define SPLITS " \t\r\n\a" //used to break up inputs
 
 
-#define BulkUp 64 //used to reallocate more space for the buffer
-#define split_input " \t\r\n\a" //used to break up inputs
-
-
-//Declaration of functions
+// function declarations
 void shell_loop();
-//the main(ish) loop that runs(or ruins) everything
 char *readin(); 
-//reads commands in and returns them to shell_loop
 char **split(char *input); 
-//splits the commands into different arguments
-int sys_or_intern(char **arguments); 
-//decides if command is built in or a system
-int SystemCommand(char **arguments); 
-//runs non built in commands
-int Internal_cd(char **arguments); 
-//my command for changing directory
-int Internal_exit(char **arguments); 
-//my command for exiting
-int Internal_status(char **arguments); 
-//my command for status
-int Internals_size();
-//returns the size of my 
-void Shotty();
-//kills zombies
-void handler(int action);
+int in_or_sys(char **arguments); 
+int sys_cmds(char **arguments); 
+int my_cd(char **arguments); 
+int my_exit(char **arguments); 
+int my_status(char **arguments); 
+int my_size();
+void zombie_killer();
+void handler(int signal);
 
 //Declaration and implimentation of weird stuff
-char *Internals_string[] = {
+char *my_strings[] = {
 	"cd", "status", "exit"
 };
 
-int (*Internals_function[]) (char **) = {
-	&Internal_cd, &Internal_status, &Internal_exit
+int (*my_funcs[]) (char **) = {
+	&my_cd, &my_status, &my_exit
 };
-
-int num_pro = 1;	//Number of processes to fork
 
 pid_t pidList[100] = {0};
 //keeps a list of PID's
@@ -56,33 +40,37 @@ pid_t pidList[100] = {0};
 pid_t watchList[100] = {0};
 //keeps a list of potential zombies, mainly any process sent to the background
 
-int pipeDir = 0;
+int pipe_direct = 0;
 //tells which direction piping is happening in
 //0=none
 //1 = > | output to file
 //2 = < | input from STDIN
 
-int pipePoint = 0;
+//number of processes
+int num_pro = 1;
+
+int pipe_point = 0;
 //argument that is using pipe
 
-int stat = 0; 
+int state = 0; 
 
 int maxArg = 0;
 
 int main(int argc, char **argv)
 {
-
-	struct sigaction sig;		//Signal handling struct
-
+	/* struct sigaction sig;
+	
 	sigemptyset(&sig.sa_mask);
 	sig.sa_flags = 0;
-	sig.sa_handler = handler;	//Tells the system to use my signal handler
-
+	sig.sa_handler = handler;
+	
+	printf("main");
+	fflush(stdout);
+	
 	sigaction(SIGHUP, &sig, NULL);
 	sigaction(SIGINT, &sig, NULL);
-	sigaction(SIGQUIT, &sig, NULL);
-
-
+	sigaction(SIGQUIT, &sig, NULL); */
+	
 	shell_loop();
 	
 	return 0;
@@ -99,8 +87,8 @@ void shell_loop()
 		fflush(stdout);
 		command = readin();
 		arguments = split(command);
-		status = sys_or_intern(arguments);
-		Shotty();
+		status = in_or_sys(arguments);
+		zombie_killer();
 		
 		free(command);
 		free(arguments);
@@ -110,6 +98,7 @@ void shell_loop()
 
 char *readin()
 {
+	
 	char *input = NULL; //character array for holding input
 	ssize_t buffer = 0; //used to take in char 
 	getline(&input, &buffer, stdin);
@@ -118,10 +107,10 @@ char *readin()
 
 char **split(char *input)
 {
-	//Machamp, buffer size for inputing and breaking things
+	//split_buff, buffer size for inputing and breaking things
 	//i, position iterator
-	int Machamp =  BulkUp, i = 0;
-	char **command = malloc(Machamp * sizeof(char*)); //the actual buffer, will hold broken up commands
+	int split_buff =  MORE_BUFF, i = 0;
+	char **command = malloc(split_buff * sizeof(char*)); //the actual buffer, will hold broken up commands
 	char *chunk; //tmp for the broken up string
 	
 	//##########TEST
@@ -133,16 +122,16 @@ char **split(char *input)
 	//##########/TEST
 	
 	
-	chunk = strtok(input, split_input);
+	chunk = strtok(input, SPLITS);
 	while (chunk != NULL)
 	{
 		command[i] = chunk;
 		i++;
 		
-		if (i >= Machamp)
+		if (i >= split_buff)
 		{
-			Machamp += BulkUp;
-			command = realloc(command, Machamp * sizeof(char*));
+			split_buff += MORE_BUFF;
+			command = realloc(command, split_buff * sizeof(char*));
 			//##########TEST
 			if(!command)
 			{
@@ -152,7 +141,7 @@ char **split(char *input)
 			//##########/TEST
 			
 		}
-		chunk = strtok(NULL, split_input);
+		chunk = strtok(NULL, SPLITS);
 	}
 	maxArg = i - 1;
 	command[i] = NULL;
@@ -160,91 +149,115 @@ char **split(char *input)
 	
 }
 
-int sys_or_intern(char **arguments)
+int in_or_sys(char **arguments)
 {
-	int i;
+	int i, fp;
 	
 	if (arguments[0] == NULL || *arguments[0] == '#') 
 	{
 		return 1;
 	}
 	
-	for (i = 0; i < Internals_size(); i++)
+	for (i = 0; i < my_size(); i++)
 	{
-		if(strcmp(arguments[0], Internals_string[i])  == 0 ) 
+		if(strcmp(arguments[0], my_strings[i])  == 0 ) 
 		{
-			return (*Internals_function[i])(arguments);
+			return (*my_funcs[i])(arguments);
 		}
 	}
 	
-	return SystemCommand(arguments);
+	//checking to see if piping is involved
+	if(maxArg == 2 && ((strcmp(arguments[1], ">") == 0) || (strcmp(arguments[1], "<") == 0)))
+	{
+		int STDOUT, STDIN;
+		STDOUT = dup(0);
+		STDIN = dup(1);
+		
+		if(strcmp(arguments[1], ">") == 0)
+		{
+			fp = open(arguments[2], O_WRONLY|O_CREAT|O_TRUNC, 0754);
+			
+			//If there is a file error
+			if(fp == -1)
+			{
+				printf("File Error\n"); 
+				state = 1;
+			} else
+			{
+				//Change standard out to point to the opened file
+				dup2(fp, 1);
+				
+				//prevent the redirection symbol from executing again.
+				arguments[1] = NULL;
+				
+				close(fp);
+				sys_cmds(arguments);
+			}
+		} else if(strcmp(arguments[1], "<") == 0)
+		{
+			//open file for reading
+			//fp = open(arguments[2], "r", 0754);
+			fp = open(arguments[2], O_RDONLY);
+			
+			//if there is a file error
+			if(fp == -1)
+			{
+				printf("File Error\n");
+				state = 1;
+			}
+			else
+			{
+				//point file to point to standard in
+				dup2(fp, 0);
+				
+				
+				//prevent redirection symbol from executing again.
+				arguments[1] = NULL;
+				
+				close(fp);
+				sys_cmds(arguments);
+			}
+		}
+		//restore input / output to standard in / out
+		dup2(STDOUT, 1);
+		close(STDOUT);
+		
+		dup2(STDIN, 0);
+		close(STDIN);
+		return 1;
+	} else
+	{
+		sys_cmds(arguments);
+		return 1;
+	}
 }
 
-int SystemCommand(char **arguments)
+int sys_cmds(char **arguments)
 {
 	pid_t pid, wpid, tmp;
 	int status, pidHeight, i, statusus, piedPiper[2], dupTest;
 	
-	//checking on Mr. Pied
-	if(pipe(piedPiper) == -1)
-	{
-		perror("Leak in the pipes");
-		exit(1);
-	}
-	
-	//looping through to look for piping
-	//starts at one under assumption that < or > won't be the first arg
-	for(i = 1; i < maxArg; i++)
-	{
-		if(*arguments[i] == '<')
-		{
-			pipeDir = 2;
-			pipePoint = i;
-		} else if (*arguments[i] == '>')
-		{
-			pipeDir = 1;
-			pipePoint = i;
-		}
-	}
-	
-	//
 	pid = fork();
-	//printf("PID: %d\n", pid);
-	//fflush(stdout);
 	
 	if(pid == 0) //the child | if exexcvp returns -1 something bad has happened
 	{
+		//checking to see if process should be run in background
 		if(*arguments[maxArg] == '&')
 		{
 			arguments[maxArg] = NULL;
 			setpgid(0, 0);
 		}
 		
-		if(pipeDir == 1)
-		{
-			close(piedPiper[0]);
-		} else if(pipeDir == 2)
-		{
-			close(piedPiper[1]);
-			arguments[pipePoint] = NULL;
-			dupTest = dup2(piedPiper[0], 0);
-			if(dupTest == -1)
-			{
-				perror("dup2");
-				exit(2);
-			}
-		}
-		
 		if(execvp(arguments[0], arguments) == -1)
 		{
 			perror("smallsh");
-			stat = 1;
+			state = 1;
 		}
 		exit(EXIT_FAILURE);
 	} else if (pid < 0) //checks to see if there was an error in forking
 	{
 		perror("smallsh");
-		stat = 1;
+		state = 1;
 	} else //handling the parent and killing the child
 	{
 		do{
@@ -256,16 +269,6 @@ int SystemCommand(char **arguments)
 					pidList[i] = pid;
 					break;
 				}
-			}
-			
-			//checks to see if any piping is occuring
-			if(pipeDir == 1)
-			{
-				close(piedPiper[1]);
-			} else if(pipeDir == 2)
-			{
-				close(piedPiper[0]);
-				write(piedPiper[1], arguments[pipePoint+1], (strlen(arguments[pipePoint+1])+1));
 			}
 			
 			//checking to see if argument is in background
@@ -282,92 +285,70 @@ int SystemCommand(char **arguments)
 					}
 				}
 				printf("background pid is %d\n", pid);
-				//printf("& Found\n");
 				fflush(stdout);
-				//arguments[maxArg] = NULL;
 			} else 
 			{
 				wpid = waitpid(pid, &status, WUNTRACED);
 				if(WIFEXITED(status))
 				{
 					
-					stat = WEXITSTATUS(status);
+					state = WEXITSTATUS(status);
 				} else if(WIFSIGNALED(status))
 				{
-					stat = WTERMSIG(status);
+					state = WTERMSIG(status);
 				} else if (WIFSTOPPED(status)) 
 				{
-					stat = WSTOPSIG(status);
+					state = WSTOPSIG(status);
 				}
+				pidList[i] = 0;
 			}
 		} while (!WIFEXITED(status) && !WIFSIGNALED(status));
 		
-	}
-	////////////////////////////////////
-	//PID TESTING
-	/* for(i = 0; i < 100; i++)
-	{
-		if(pidList[i] != 0)
-		{
-			tmp = pidList[i];
-			printf("PID: %d\n", tmp);
-			fflush(stdout);
-		} else {
-			break;
-		}
-	} */
-	////////////////////////////////////
-	
+	}	
 	return 1;
 }
 
-int Internals_size() 
+int my_size() 
 {
-	return sizeof(Internals_string) / sizeof(char *);
+	return sizeof(my_strings) / sizeof(char *);
 }
 
-int Internal_cd(char **arguments)
+int my_cd(char **arguments)
 {
 	if(arguments[1] == NULL) 
 	{
-		fprintf(stderr, "expected arguments to \"cd\"\n");
+		fprintf(stderr, "expected arguments after \"cd\"\n");
 		fflush(stdout);
-		stat = 1;
+		state = 1;
 		
 	} else {
 		if (chdir(arguments[1]) != 0 )
 		{
 			perror("smallsh");
-			stat = 1;
+			state = 1;
 		}
 		else 
 		{
-			stat = 0;
+			state = 0;
 		}
 	}
 	
 	return 1;
 }
 
-int Internal_exit(char **arguments)
+int my_exit(char **arguments)
 {
 	return 0;
 }
 
-int Internal_status(char **arguments)
+int my_status(char **arguments)
 {
-	//printf("Status? Dope\n");
-	printf("exit value %d\n", stat);
+	printf("exit value %d\n", state);
 	fflush(stdout);
 	return 1;
 }
 
-void Zombie_Status()
-{
-	
-}
-
-void Shotty()
+void zombie_killer()
 {
 	pid_t zombiechild;
 	int status, i;
@@ -380,55 +361,75 @@ void Shotty()
 				if(WIFEXITED(status))
 				{
 					
-					stat = WEXITSTATUS(status);
+					state = WEXITSTATUS(status);
 				} else if(WIFSIGNALED(status))
 				{
-					stat = WTERMSIG(status);
+					state = WTERMSIG(status);
 				} else if (WIFSTOPPED(status)) 
 				{
-					stat = WSTOPSIG(status);
+					state = WSTOPSIG(status);
 				}
-				printf("background pid %d is done: exit value %d\n", zombiechild, stat);
+				printf("background process pid %d is done: exit value %d\n", zombiechild, state );
+				fflush(stdout);
+				watchList[i] = 0;
 			}
 		}
 	}
 }
 
-//Waits for all of the children to finish
-void burn_kids() {
-	int i, status;
-	for (i = 0; i < num_pro; ++i) {
-		wait(NULL);
+/* void handler(int signal)
+{
+	printf("\nENTERED HANDLER\nSIGNAL CAUGHT\n");
+	int i, status, sig = 0, killed = 0;
+	
+	switch(signal)
+	{
+		case SIGQUIT:
+			printf("SIG-1");
+			fflush(stdout);
+			sig = SIGQUIT;
+			break;
+		case SIGHUP:
+			sig = SIGQUIT;
+			printf("SIG-2");
+			fflush(stdout);
+			break;
+		case SIGINT:
+			sig = SIGINT;
+			printf("SIG-3\n");
+			fflush(stdout);
+			for(i = 0; i < 100; i++)
+			{
+				if(watchList[i]!=0)
+				{
+					kill(watchList[i], sig);
+					watchList[i] = 0;
+					killed = 1;
+					break;
+				} else if(pidList[i]!=0)
+				{
+					kill(pidList[i], sig);
+					pidList[i] = 0;
+					killed = 1;
+					break;
+				}
+			}
+			break;
+		default:
+			sig = SIGQUIT;
+			printf("SIG-Default");
+			fflush(stdout);
 	}
-}
-
-//Sends signals to all of the offspring.
-void handler(int action) {
-	printf("\nENTERED HANDLER\n SIGNAL CAUGHT\n");
-	int signal = 0;
-	int i;
-
-	switch (action) {
-	case SIGQUIT:
-		signal = SIGQUIT;
-		break;
-	case SIGHUP:
-		signal = SIGQUIT;
-		break;
-	case SIGINT:
-		signal = SIGINT;
-		break;
-	default:
-		signal = SIGQUIT;
+	//for(i = 0; i < num_pro; i++)
+	//{
+	//	kill(pidList[i], sig);
+	//} 
+	
+	if(killed == 0)
+	{
+		exit(1);
 	}
-	for (i = 0; i < num_pro; ++i) {
-		kill(pidList[i], signal);
-	}
-
-	//Kill all of the kids
-	burn_kids();
-
-	//free(pidList);
-
-	exit(1);
-}
+	killed = 0;
+	
+	shell_loop();
+} */
